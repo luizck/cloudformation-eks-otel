@@ -1,0 +1,176 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Mappings:
+  DataPrepper:
+    Ports:
+      otel: '21890'
+      healthcheck: '4900'
+
+Parameters:
+  AppName:
+    Type: String
+  Cluster:
+    Type: String
+  DesiredCount:
+    Type: Number
+    Default: 1
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+  PrivateNamespaceId:
+    Type: String
+  VpcCIDR:
+    Type: String
+  VpcId:
+    Type: String
+
+Resources:
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${AWS::StackName}-alb
+      SecurityGroupIngress:
+        - CidrIp: !Ref VpcCIDR
+          IpProtocol: TCP
+          FromPort: !FindInMap [ DataPrepper, Ports, otel ]
+          ToPort: !FindInMap [ DataPrepper, Ports, otel ]
+        - CidrIp: !Ref VpcCIDR
+          IpProtocol: TCP
+          FromPort: !FindInMap [ DataPrepper, Ports, healthcheck ]
+          ToPort: !FindInMap [ DataPrepper, Ports, healthcheck ]
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub ${AppName}-ecs-${AWS::StackName}
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: !Sub ${AppName}-task-policy-${AWS::StackName}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: "*"
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+      Policies:
+        - PolicyName: !Sub ${AppName}-task-policy-${AWS::StackName}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:PutLogEvents
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:DescribeLogGroups
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingTargets
+                  - xray:GetSamplingStatisticSummaries
+                  - ssm:GetParameters
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - aps:RemoteWrite
+                Resource: "*"
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/${AppName}
+      RetentionInDays: 1
+
+  FargateService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub ${AppName}-service-${AWS::StackName}
+      Cluster: !Ref Cluster
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref SecurityGroup
+          Subnets: !Ref Subnets
+      ServiceRegistries:
+        - RegistryArn: !GetAtt DiscoveryService.Arn
+          ContainerName: !Ref AppName
+
+  DiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Description: Discovery Service for the Otel Application
+      DnsConfig:
+        NamespaceId: !Ref PrivateNamespaceId
+        RoutingPolicy: MULTIVALUE
+        DnsRecords:
+          - TTL: 60
+            Type: A
+      HealthCheckCustomConfig:
+        FailureThreshold: 3
+      Name: !Ref AppName
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${AppName}-taskdef-${AWS::StackName}
+      RequiresCompatibilities:
+        - FARGATE
+      Memory: 512
+      Cpu: 256
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: !Ref AppName
+          Image: 802916831419.dkr.ecr.sa-east-1.amazonaws.com/data-prepper:latest
+          Essential: true
+          Memory: 512
+          PortMappings:
+            - ContainerPort: !FindInMap [ DataPrepper, Ports, otel]
+            - ContainerPort: !FindInMap [ DataPrepper, Ports, healthcheck]
+#          Secrets:
+#            - Name: AOT_CONFIG_CONTENT
+#              ValueFrom: !Ref AotConfigParameter
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroup
+              awslogs-stream-prefix: ecs
+
+Outputs:
+  Service:
+    Value: !Ref FargateService
+  SecurityGroup:
+    Value: !Ref SecurityGroup

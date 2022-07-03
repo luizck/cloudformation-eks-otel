@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Opentelemetry e DataPrepper
+
+Transform:
+- AWS::Serverless-2016-10-31
+
+Mappings:
+  App:
+    Name:
+      otel: 'otel'
+
+Parameters:
+  VpcCIDR:
+    Type: String
+    Default: 10.215.0.0/16
+    Description: CIDR of the VPC
+
+  PublicCidrA:
+    Type: String
+    Default: 10.215.10.0/24
+    Description: CIDR of the Subnet 1
+
+  PublicCidrB:
+    Type: String
+    Default: 10.215.20.0/24
+    Description: CIDR of the Subnet 2
+
+  PrivateCidrA:
+    Type: String
+    Default: 10.215.30.0/24
+    Description: CIDR of the Subnet 1
+
+  PrivateCidrB:
+    Type: String
+    Default: 10.215.40.0/24
+    Description: CIDR of the Subnet 2
+
+  PrivateDomain:
+    Type: String
+    Default: demo.local
+    Description: Private domain that will be created for service discovery
+
+
+Resources:
+
+  VPC:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: ./templates/vpc.yaml
+      Parameters:
+        Name: !Ref AWS::StackName
+        VpcCIDR: !Ref VpcCIDR
+        PublicCidrA: !Ref PublicCidrA
+        PublicCidrB: !Ref PublicCidrB
+        PrivateCidrA: !Ref PrivateCidrA
+        PrivateCidrB: !Ref PrivateCidrB
+
+  Cluster:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: ./templates/ecs-cluster.yaml
+
+  Route53:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: ./templates/route53.yaml
+      Parameters:
+        VpcId: !GetAtt VPC.Outputs.VpcId
+        PrivateDomain: !Ref PrivateDomain
+
+  DataPrepperService:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: ./templates/data-prepper-service.yaml
+      Parameters:
+        AppName: data-prepper
+        VpcCIDR: !Ref VpcCIDR
+        VpcId: !GetAtt VPC.Outputs.VpcId
+        Cluster: !GetAtt Cluster.Outputs.ClusterName
+        Subnets: !GetAtt VPC.Outputs.PrivateSubnets
+        PrivateNamespaceId: !GetAtt Route53.Outputs.PrivateNamespaceId
+        DesiredCount: 1        
+
+  OtelService:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: ./templates/otel-service.yaml
+      Parameters:
+        AppName: !FindInMap [ App, Name, otel]
+        VpcCIDR: !Ref VpcCIDR
+        VpcId: !GetAtt VPC.Outputs.VpcId
+        Cluster: !GetAtt Cluster.Outputs.ClusterName
+        Subnets: !GetAtt VPC.Outputs.PrivateSubnets
+        PrivateNamespaceId: !GetAtt Route53.Outputs.PrivateNamespaceId
+        #PrometheusEndpoint: https://aps-workspaces.us-east-1.amazonaws.com/workspaces/ws-da9d8de5-3d74-4bf5-ba4f-3cfab01c5bf6/
+        DesiredCount: 1        
